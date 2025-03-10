@@ -1,0 +1,240 @@
+# Federated Learning Coordinator Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fl-config
+  namespace: federated-learning
+data:
+  hyperparameters.yaml: |
+    learning_rate: 0.01
+    batch_size: 64
+    num_epochs: 10
+    aggregation_interval: 300
+    model: resnet18
+    differential_privacy:
+      enabled: true
+      epsilon: 0.5
+      delta: 1e-5
+
+---
+# Secure Model Encryption Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fl-secrets
+  namespace: federated-learning
+type: Opaque
+data:
+  encryption_key: BASE64_ENCODED_VALUE
+  api_token: BASE64_ENCODED_VALUE
+
+---
+# RBAC Permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: federated-learning
+  name: fl-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update"]
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fl-service-account
+  namespace: federated-learning
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fl-role-binding
+  namespace: federated-learning
+subjects:
+- kind: ServiceAccount
+  name: fl-service-account
+roleRef:
+  kind: Role
+  name: fl-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Main Federated Learning Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fl-coordinator
+  namespace: federated-learning
+  labels:
+    app: federated-learning
+    task-type: coordinator
+    framework: pysyft
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      serviceAccountName: fl-service-account
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        runAsNonRoot: true
+      restartPolicy: OnFailure
+      containers:
+      - name: fl-coordinator
+        image: opensourcefed/fl-coordinator:v0.5.0
+        imagePullPolicy: IfNotPresent
+        args: ["--config=/etc/fl-config/hyperparameters.yaml"]
+        env:
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: fl-secrets
+              key: encryption_key
+        - name: NODE_COUNT
+          value: "10"
+        - name: MODEL_BUCKET
+          value: "s3://models/fl-model-v1"
+        ports:
+        - name: http
+          containerPort: 8000
+        - name: grpc
+          containerPort: 50051
+        resources:
+          requests:
+            cpu: 2
+            memory: 4Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: 4
+            memory: 8Gi
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: fl-config
+          mountPath: /etc/fl-config
+          readOnly: true
+        - name: shared-model
+          mountPath: /shared-models
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["python", "check_readiness.py"]
+        startupProbe:
+          tcpSocket:
+            port: grpc
+          failureThreshold: 30
+          periodSeconds: 10
+        securityContext:
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+      volumes:
+      - name: fl-config
+        configMap:
+          name: fl-config
+      - name: shared-model
+        persistentVolumeClaim:
+          claimName: fl-model-pvc
+
+---
+# Worker Pod Template Example
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fl-worker-template
+  namespace: federated-learning
+spec:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+          - key: app
+            operator: In
+            values: ["federated-learning"]
+        topologyKey: "kubernetes.io/hostname"
+  tolerations:
+  - key: "fl-worker"
+    operator: "Exists"
+    effect: "NoSchedule"
+  containers:
+  - name: fl-worker
+    image: opensourcefed/fl-worker:v0.5.0
+    envFrom:
+    - configMapRef:
+        name: fl-config
+    - secretRef:
+        name: fl-secrets
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
+
+---
+# Model Storage PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fl-model-pvc
+  namespace: federated-learning
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-storage
+
+---
+# CronJob for Periodic Retraining
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: fl-retrain
+  namespace: federated-learning
+spec:
+  schedule: "0 0 * * 0"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: retrain
+            image: opensourcefed/fl-retrain:v0.5.0
+            args: ["--model-version=v1.2", "--force-refresh"]
+            envFrom:
+            - secretRef:
+                name: fl-secrets
+
+---
+# Monitoring Configuration
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: fl-monitor
+  namespace: federated-learning
+spec:
+  selector:
+    matchLabels:
+      app: federated-learning
+  podMetricsEndpoints:
+  - port: http
+    interval: 30s
+    path: /metrics
