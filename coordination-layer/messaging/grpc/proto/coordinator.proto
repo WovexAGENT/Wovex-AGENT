@@ -1,0 +1,294 @@
+syntax = "proto3";
+
+package hadeanai.coordinator.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/api/annotations.proto";
+import "validate/validate.proto";
+import "google/rpc/status.proto";
+import "hadeanai/agent/v1/agent.proto";
+
+option go_package = "github.com/hadeanai/protos/coordinator/v1;coordinatorv1";
+option java_multiple_files = true;
+option java_package = "com.hadeanai.coordinator.v1";
+option csharp_namespace = "HadeanAi.Coordinator.V1";
+
+service CoordinatorService {
+  // Cluster Management
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse) {
+    option (google.api.http) = {
+      post: "/v1/nodes"
+      body: "*"
+    };
+  }
+
+  rpc DeregisterNode(DeregisterNodeRequest) returns (DeregisterNodeResponse) {
+    option (google.api.http) = {
+      delete: "/v1/nodes/{node_id}"
+    };
+  }
+
+  rpc ListNodes(ListNodeRequest) returns (ListNodeResponse) {
+    option (google.api.http) = {
+      get: "/v1/nodes"
+    };
+  }
+
+  // Task Management
+  rpc CreateTask(CreateTaskRequest) returns (CreateTaskResponse) {
+    option (google.api.http) = {
+      post: "/v1/tasks"
+      body: "*"
+    };
+  }
+
+  rpc UpdateTask(UpdateTaskRequest) returns (UpdateTaskResponse) {
+    option (google.api.http) = {
+      patch: "/v1/tasks/{task_id}"
+      body: "*"
+    };
+  }
+
+  rpc StreamTasks(stream TaskStreamRequest) returns (stream TaskStreamResponse);
+
+  // Resource Management
+  rpc AllocateResources(AllocateRequest) returns (AllocateResponse);
+  rpc ReleaseResources(ReleaseRequest) returns (ReleaseResponse);
+
+  // Health Monitoring
+  rpc NodeHeartbeat(stream NodeStatus) returns (stream CoordinatorCommand);
+  rpc ClusterHealth(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Policy Management
+  rpc ApplyPolicy(PolicyRequest) returns (PolicyResponse);
+  rpc ValidatePolicy(ValidatePolicyRequest) returns (ValidatePolicyResponse);
+
+  // Data Operations
+  rpc SynchronizeState(StateSyncRequest) returns (StateSyncResponse);
+  rpc ReplicateData(stream DataChunk) returns (DataAck);
+}
+
+// Cluster Node Definition
+message NodeSpec {
+  string id = 1 [(validate.rules).string.uuid = true];
+  string cluster = 2 [(validate.rules).string = {min_len: 3, max_len: 63}];
+  
+  enum NodeRole {
+    NODE_ROLE_UNSPECIFIED = 0;
+    WORKER = 1;
+    CONTROL_PLANE = 2;
+    STORAGE = 3;
+    GATEWAY = 4;
+  }
+  NodeRole role = 3;
+  
+  hadeanai.agent.v1.AgentConfig capabilities = 4;
+  map<string, string> labels = 5;
+  google.protobuf.Timestamp joined_at = 6;
+  NodeLocation location = 7;
+}
+
+message NodeLocation {
+  string region = 1 [(validate.rules).string = {pattern: "^[a-z0-9-]{3,30}$"}];
+  string zone = 2 [(validate.rules).string = {pattern: "^[a-z0-9-]{3,30}$"}];
+  string rack = 3;
+}
+
+// Task Management
+message TaskSpec {
+  string id = 1 [(validate.rules).string.uuid = true];
+  string name = 2 [(validate.rules).string = {min_len: 3, max_len: 255}];
+  
+  oneof task_type {
+    ComputeTask compute = 3;
+    DataTask data = 4;
+    ServiceTask service = 5;
+  }
+  
+  hadeanai.agent.v1.SchedulingConstraints constraints = 4;
+  map<string, string> parameters = 5;
+  google.protobuf.Duration timeout = 6;
+  uint32 retries = 7 [(validate.rules).uint32 = {lte: 10}];
+}
+
+message ComputeTask {
+  string image = 1 [(validate.rules).string.uri_ref = true];
+  repeated string command = 2;
+  map<string, string> env = 3;
+  hadeanai.agent.v1.ResourceLimits resources = 4;
+}
+
+message DataTask {
+  string source = 1 [(validate.rules).string.uri = true];
+  string destination = 2 [(validate.rules).string.uri = true];
+  string checksum = 3;
+}
+
+message ServiceTask {
+  string protocol = 1 [(validate.rules).string = {in: ["http", "https", "grpc"]}];
+  uint32 port = 2 [(validate.rules).uint32 = {gt: 0, lte: 65535}];
+  string health_check = 3 [(validate.rules).string.uri_ref = true];
+}
+
+// Resource Allocation
+message ResourcePool {
+  message ResourceEntry {
+    string type = 1 [(validate.rules).string = {in: ["cpu", "gpu", "memory", "storage"]}];
+    string unit = 2;
+    double quantity = 3;
+  }
+  
+  string pool_id = 1 [(validate.rules).string = {pattern: "^[a-z0-9-]{3,63}$"}];
+  repeated ResourceEntry resources = 2;
+  map<string, string> attributes = 3;
+}
+
+message AllocateRequest {
+  string task_id = 1 [(validate.rules).string.uuid = true];
+  repeated ResourcePool required = 2;
+  hadeanai.agent.v1.SchedulingConstraints constraints = 3;
+}
+
+message AllocateResponse {
+  string allocation_id = 1;
+  map<string, ResourcePool> allocated = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// Policy Management
+message PolicySpec {
+  string name = 1 [(validate.rules).string = {pattern: "^[a-zA-Z0-9-_]{3,63}$"}];
+  
+  oneof policy_type {
+    SchedulingPolicy scheduling = 2;
+    SecurityPolicy security = 3;
+    CostPolicy cost = 4;
+  }
+  
+  google.protobuf.Timestamp effective_from = 5;
+  google.protobuf.Timestamp effective_until = 6;
+}
+
+message SchedulingPolicy {
+  message PriorityClass {
+    string name = 1;
+    int32 value = 2 [(validate.rules).int32 = {gt: 0, lte: 1000}];
+  }
+  
+  repeated PriorityClass priorities = 1;
+  string default_class = 2;
+  bool fair_share = 3;
+}
+
+message SecurityPolicy {
+  message RBACRule {
+    string role = 1 [(validate.rules).string = {min_len: 3}];
+    repeated string verbs = 2;
+    repeated string resources = 3;
+  }
+  
+  repeated RBACRule rules = 1;
+  bool audit_logging = 2;
+}
+
+message CostPolicy {
+  message ResourceCost {
+    string type = 1;
+    double cost_per_unit = 2;
+    string currency = 3 [(validate.rules).string.len = 3];
+  }
+  
+  repeated ResourceCost costs = 1;
+  double budget_limit = 2;
+}
+
+// Data Replication
+message DataChunk {
+  oneof chunk_type {
+    bytes raw = 1;
+    Metadata meta = 2;
+  }
+  
+  message Metadata {
+    string checksum = 1 [(validate.rules).string = {pattern: "^[0-9a-f]{32,128}$"}];
+    uint64 total_size = 2;
+    string content_type = 3;
+  }
+  
+  uint64 sequence = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+message DataAck {
+  uint64 last_sequence = 1;
+  string checksum = 2;
+  google.rpc.Status status = 3;
+}
+
+// Monitoring & Health
+message NodeStatus {
+  string node_id = 1 [(validate.rules).string.uuid = true];
+  hadeanai.agent.v1.HealthStatus health = 2;
+  hadeanai.agent.v1.ResourceUsage resources = 3;
+  repeated string conditions = 4;
+}
+
+message CoordinatorCommand {
+  oneof command {
+    string reconfigure = 1;
+    string maintenance = 2;
+    string drain = 3;
+    string evacuate = 4;
+  }
+}
+
+// Authentication & Security
+message AuthConfig {
+  message TokenAuth {
+    string header = 1 [(validate.rules).string = {pattern: "^[A-Za-z0-9-]{3,30}$"}];
+    string prefix = 2 [(validate.rules).string = {pattern: "^[A-Za-z0-9]{1,10}$"}];
+  }
+  
+  message CertificateAuth {
+    string ca_bundle = 1 [(validate.rules).string.min_bytes = 1];
+    repeated string allowed_orgs = 2;
+  }
+  
+  oneof mechanism {
+    TokenAuth token = 1;
+    CertificateAuth cert = 2;
+  }
+}
+
+// Advanced Features
+message PluginConfig {
+  string name = 1 [(validate.rules).string = {min_len: 3, max_len: 63}];
+  string entrypoint = 2 [(validate.rules).string.min_len = 1];
+  map<string, string> config = 3;
+  bool hot_reload = 4;
+}
+
+message StorageBackend {
+  oneof backend {
+    DatabaseStorage database = 1;
+    ObjectStorage object = 2;
+    DistributedStorage distributed = 3;
+  }
+  
+  message DatabaseStorage {
+    string dsn = 1 [(validate.rules).string.uri = true];
+    string engine = 2 [(validate.rules).string = {in: ["postgres", "mysql", "cockroachdb"]}];
+  }
+  
+  message ObjectStorage {
+    string endpoint = 1 [(validate.rules).string.uri = true];
+    string bucket = 2;
+    string prefix = 3;
+  }
+  
+  message DistributedStorage {
+    repeated string nodes = 1 [(validate.rules).repeated = {min_items: 3}];
+    uint32 replication = 2 [(validate.rules).uint32 = {gte: 2, lte: 5}];
+  }
+}
