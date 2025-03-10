@@ -1,0 +1,284 @@
+syntax = "proto3";
+
+package hadeanai.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/api/annotations.proto";
+import "validate/validate.proto";
+
+option go_package = "github.com/hadeanai/protos/agent/v1;agentv1";
+option java_multiple_files = true;
+option java_package = "com.hadeanai.agent.v1";
+option csharp_namespace = "HadeanAi.Agent.V1";
+
+// Core Agent Service Definition
+service AgentService {
+  // Agent lifecycle management
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse) {
+    option (google.api.http) = {
+      post: "/v1/agents"
+      body: "*"
+    };
+  }
+  
+  rpc DeregisterAgent(DeregisterAgentRequest) returns (DeregisterAgentResponse) {
+    option (google.api.http) = {
+      delete: "/v1/agents/{agent_id}"
+    };
+  }
+
+  // Agent communication
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+  
+  rpc ReportStatus(ReportStatusRequest) returns (ReportStatusResponse) {
+    option (google.api.http) = {
+      post: "/v1/agents/{agent_id}/status"
+      body: "*"
+    };
+  }
+
+  // Task execution
+  rpc ExecuteCommand(CommandRequest) returns (CommandResponse) {
+    option (google.api.http) = {
+      post: "/v1/agents/{agent_id}/commands"
+      body: "*"
+    };
+  }
+
+  // File operations
+  rpc UploadFile(stream FileChunk) returns (FileUploadResponse);
+  rpc DownloadFile(FileRequest) returns (stream FileChunk);
+
+  // Log streaming
+  rpc StreamLogs(LogsRequest) returns (stream LogsResponse);
+}
+
+// Agent Metadata Definition
+message AgentMetadata {
+  string id = 1 [
+    (validate.rules).string = {
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      len: 36
+    }
+  ];
+  string name = 2 [(validate.rules).string = {min_len: 3, max_len: 63}];
+  string version = 3 [(validate.rules).string = {pattern: "^\\d+\\.\\d+\\.\\d+(-\\w+)?$"}];
+  
+  enum AgentType {
+    AGENT_TYPE_UNSPECIFIED = 0;
+    AGENT_TYPE_COMPUTE = 1;
+    AGENT_TYPE_STORAGE = 2;
+    AGENT_TYPE_NETWORK = 3;
+    AGENT_TYPE_MONITORING = 4;
+    AGENT_TYPE_SECURITY = 5;
+  }
+  AgentType type = 4;
+  
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+  
+  google.protobuf.Timestamp registration_time = 7;
+  google.protobuf.Timestamp last_seen = 8;
+}
+
+// Agent Configuration
+message AgentConfig {
+  message ResourceLimits {
+    uint32 cpu_cores = 1 [(validate.rules).uint32 = {gte: 1, lte: 64}];
+    uint64 memory_mb = 2 [(validate.rules).uint64 = {gte: 256, lte: 131072}];
+    uint32 gpu_count = 3;
+    string gpu_type = 4;
+  }
+
+  message Environment {
+    map<string, string> variables = 1 [(validate.rules).map = {
+      min_pairs: 0,
+      keys: {string: {pattern: "^[A-Z_][A-Z0-9_]*$"}},
+      values: {string: {max_len: 1024}}
+    }];
+    repeated string secrets = 2;
+  }
+
+  ResourceLimits resource_limits = 1;
+  Environment environment = 2;
+  
+  google.protobuf.Duration heartbeat_interval = 3 [
+    (validate.rules).duration = {
+      required: true,
+      gte: {seconds: 1},
+      lte: {seconds: 300}
+    }
+  ];
+  
+  message NetworkSpec {
+    repeated string dns_servers = 3;
+    repeated string allowed_ports = 4 [
+      (validate.rules).repeated = {
+        items: {string: {pattern: "^\\d+(-\\d+)?/(tcp|udp)$"}}
+      }
+    ];
+  }
+  NetworkSpec network = 4;
+  
+  message SecurityContext {
+    bool privileged = 1;
+    string run_as_user = 2;
+    string run_as_group = 3;
+    repeated string capabilities = 4;
+  }
+  SecurityContext security = 5;
+}
+
+// Health Status Reporting
+message HealthStatus {
+  enum HealthCondition {
+    HEALTH_CONDITION_UNKNOWN = 0;
+    HEALTHY = 1;
+    DEGRADED = 2;
+    UNHEALTHY = 3;
+    TERMINATING = 4;
+  }
+  HealthCondition condition = 1;
+  
+  string details = 2;
+  map<string, string> metrics = 3;
+  
+  message ResourceUsage {
+    double cpu_usage = 1;
+    double memory_usage = 2;
+    uint64 network_tx = 3;
+    uint64 network_rx = 4;
+    uint64 disk_usage = 5;
+  }
+  ResourceUsage resources = 4;
+}
+
+// Agent Status Information
+message AgentStatus {
+  enum StatusPhase {
+    STATUS_PHASE_UNSPECIFIED = 0;
+    INITIALIZING = 1;
+    RUNNING = 2;
+    IDLE = 3;
+    DRAINING = 4;
+    TERMINATED = 5;
+  }
+  StatusPhase phase = 1;
+  
+  repeated string conditions = 2;
+  HealthStatus health = 3;
+  google.protobuf.Timestamp last_updated = 4;
+}
+
+// Request/Response Messages
+message RegisterAgentRequest {
+  AgentMetadata metadata = 1 [(validate.rules).message.required = true];
+  AgentConfig config = 2 [(validate.rules).message.required = true];
+}
+
+message RegisterAgentResponse {
+  string agent_id = 1;
+  google.protobuf.Timestamp expiration_time = 2;
+  bytes auth_token = 3;
+}
+
+message DeregisterAgentRequest {
+  string agent_id = 1 [
+    (validate.rules).string = {
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      len: 36
+    }
+  ];
+  bool force = 2;
+}
+
+message DeregisterAgentResponse {
+  google.protobuf.Timestamp termination_time = 1;
+}
+
+message HeartbeatRequest {
+  string agent_id = 1 [(validate.rules).string.uuid = true];
+  HealthStatus health = 2;
+  AgentStatus status = 3;
+}
+
+message HeartbeatResponse {
+  bool reconfigure = 1;
+  bytes configuration = 2;
+}
+
+message CommandRequest {
+  string agent_id = 1 [(validate.rules).string.uuid = true];
+  string command = 2 [(validate.rules).string = {min_len: 1, max_len: 1024}];
+  repeated string args = 3;
+  map<string, string> env = 4;
+  google.protobuf.Duration timeout = 5;
+}
+
+message CommandResponse {
+  int32 exit_code = 1;
+  bytes output = 2;
+  bytes error = 3;
+}
+
+message FileChunk {
+  string agent_id = 1 [(validate.rules).string.uuid = true];
+  string file_path = 2 [(validate.rules).string = {min_len: 1, max_len: 4096}];
+  bytes chunk = 3;
+  uint64 offset = 4;
+  bool eof = 5;
+}
+
+message FileUploadResponse {
+  string file_path = 1;
+  uint64 size = 2;
+  string checksum = 3;
+}
+
+message LogsRequest {
+  string agent_id = 1 [(validate.rules).string.uuid = true];
+  google.protobuf.Timestamp since = 2;
+  bool follow = 3;
+  uint32 tail = 4;
+}
+
+message LogsResponse {
+  repeated LogEntry entries = 1;
+  
+  message LogEntry {
+    google.protobuf.Timestamp timestamp = 1;
+    string level = 2;
+    string component = 3;
+    string message = 4;
+    map<string, string> context = 5;
+  }
+}
+
+// Advanced Scheduling Constraints
+message SchedulingConstraints {
+  message NodeAffinity {
+    message Requirement {
+      string key = 1;
+      enum Operator {
+        OP_UNSPECIFIED = 0;
+        IN = 1;
+        NOT_IN = 2;
+        EXISTS = 3;
+        DOES_NOT_EXIST = 4;
+      }
+      Operator operator = 2;
+      repeated string values = 3;
+    }
+    repeated Requirement requirements = 1;
+  }
+
+  message ResourceRequirements {
+    map<string, string> limits = 1;
+    map<string, string> requests = 2;
+  }
+
+  NodeAffinity node_affinity = 1;
+  repeated string tolerated_taints = 2;
+  ResourceRequirements resources = 3;
+}
