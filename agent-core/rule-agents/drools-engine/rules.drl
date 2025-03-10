@@ -1,0 +1,208 @@
+package com.company.rules
+
+import java.util.List
+import java.math.BigDecimal
+import com.company.entities.*
+import com.company.services.*
+
+global org.slf4j.Logger logger
+global MetricsService metricsService
+global AuditService auditService
+
+dialect "java"
+
+// Custom functions
+function Boolean isValidTaxId(String taxId) {
+    return taxId != null && taxId.matches("[A-Z]{2}\\d{9}");
+}
+
+function void logRuleActivation(String ruleName, Object fact) {
+    logger.info("Rule '{}' activated for {}", ruleName, fact.getClass().getSimpleName());
+}
+
+// Rule attributes template
+template SALIENCE
+    salience $param
+end
+
+template RULEFLOW
+    ruleflow-group "$param"
+end
+
+// Validation rules
+rule "Validate Order Minimum Amount"
+    salience 100
+    ruleflow-group "validation"
+    when
+        $o: Order(totalAmount < 100.00, status == OrderStatus.NEW)
+    then
+        modify($o) {
+            setValidationErrors(
+                addValidationError($o.getValidationErrors(), 
+                    "ORDER_AMOUNT_TOO_LOW", 
+                    "Minimum order amount is 100.00")
+            )
+        };
+        metricsService.incrementCounter("validation.errors", "type:amount");
+end
+
+rule "Detect High Risk Geography"
+    ruleflow-group "fraudDetection"
+    lock-on-active true
+    when
+        Customer($country: shippingAddress.country) from $c
+        $o: Order(customer == $c, totalAmount > 5000.00)
+        exists (FraudReport(country == $country, riskLevel > 7))
+    then
+        insert(new FraudDetectionEvent($o, "HIGH_RISK_GEOGRAPHY"));
+        auditService.logFraudAttempt($c.getId(), $o.getId());
+end
+
+// Pricing rules
+rule "Apply Volume Discount"
+    salience 50
+    ruleflow-group "pricing"
+    when
+        $o: Order(totalAmount >= 1000.00, discount == null)
+        $c: Customer(loyaltyTier >= 2) from $o.getCustomer()
+        $config: PricingConfig(discountTiers contains "VOLUME")
+    then
+        BigDecimal discountAmount = $o.getTotalAmount().multiply(new BigDecimal("0.1"));
+        modify($o) {
+            setDiscount(discountAmount),
+            setTotalAmount($o.getTotalAmount().subtract(discountAmount))
+        };
+        logger.info("Applied 10% volume discount to order {}", $o.getId());
+end
+
+rule "Calculate Dynamic Pricing"
+    ruleflow-group "pricing"
+    when
+        $item: OrderItem(stockLevel < 10, product.category == "ELECTRONICS")
+        $pricing: DynamicPricingStrategy(
+            strategyId: id, 
+            productId == $item.getProduct().getId()
+        )
+        not SuspendedStrategy(id == $pricing.strategyId)
+    then
+        BigDecimal newPrice = $item.getPrice().multiply(
+            new BigDecimal($pricing.getMultiplier())
+        );
+        modify($item) { setPrice(newPrice) };
+end
+
+// Temporal rules
+rule "Monitor Payment Completion Timeout"
+    ruleflow-group "temporal"
+    timer(int: 30m 10s)
+    when
+        $p: PaymentProcess(
+            status == PaymentStatus.PENDING, 
+            startTime before[30m] new Date()
+        )
+    then
+        insert(new PaymentTimeoutEvent($p));
+        update($p) { setStatus(PaymentStatus.EXPIRED) };
+end
+
+// Complex event processing
+rule "Detect Rapid Order Sequence"
+    ruleflow-group "fraudDetection"
+    when
+        $c: Customer()
+        accumulate(
+            Order(
+                customer == $c, 
+                status == OrderStatus.COMPLETED, 
+                this after[0,5m] $prev
+            );
+            $count : count(),
+            $last : max($prev)
+        )
+        eval($count > 3)
+    then
+        FraudDetectionEvent event = new FraudDetectionEvent($last, "RAPID_ORDER_SEQUENCE");
+        event.setMetadata(Map.of("orderCount", $count));
+        insert(event);
+end
+
+// Decision table bridge
+rule "Apply Seasonal Promotions"
+    ruleflow-group "promotions"
+    when
+        $o: Order(promotionApplied == false)
+        $promo: Promotion(
+            active == true, 
+            validFrom <= $o.getCreatedAt(), 
+            validTo >= $o.getCreatedAt()
+        )
+        eval($promo.isApplicable($o))
+    then
+        applyPromotion($o, $promo);
+        metricsService.incrementCounter("promotions.applied", "type:" + $promo.getType());
+end
+
+// Cross-domain validation
+rule "Validate Pharmaceutical Prescription"
+    ruleflow-group "compliance"
+    when
+        $o: Order(items contains $item)
+        $item: OrderItem(product.category == "PHARMACEUTICAL")
+        not Prescription(
+            customer == $o.getCustomer(), 
+            product == $item.getProduct(),
+            valid == true
+        )
+    then
+        rejectOrderItem($item, "MISSING_PRESCRIPTION");
+end
+
+// State transition rules
+rule "Process Order Completion"
+    ruleflow-group "stateTransitions"
+    when
+        $o: Order(
+            status == OrderStatus.PAYMENT_RECEIVED,
+            allItemsFulfilled() == true
+        )
+        not OrderProblem(order == $o)
+    then
+        update($o) { setStatus(OrderStatus.COMPLETED) };
+        insert(new OrderCompletionEvent($o));
+        logger.info("Order {} completed successfully", $o.getId());
+end
+
+// Error handling rules
+rule "Handle System Errors"
+    salience 1000
+    when
+        $e: SystemError()
+    then
+        logger.error("System error detected: {}", $e.getMessage());
+        retryFailedOperation($e);
+        insert(new ErrorHandledEvent($e));
+end
+
+// Testing support rules
+rule "Mock External Service Response"
+    ruleflow-group "test"
+    when
+        $testCtx: TestContext(mockExternalServices == true)
+        $req: ExternalServiceRequest()
+    then
+        ExternalServiceResponse response = createMockResponse($req);
+        insert(response);
+end
+
+// Audit logging rules
+rule "Log All State Changes"
+    when
+        $fact: BaseEntity() from entry-point "state-changes"
+        $old: Object() from previous($fact)
+    then
+        auditService.logStateChange(
+            $fact.getClass().getSimpleName(),
+            $fact.getId(),
+            delta($old, $fact)
+        );
+end
