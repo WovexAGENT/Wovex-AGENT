@@ -1,0 +1,193 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agent-nodes
+  namespace: monitoring
+  labels:
+    app: cluster-agent
+    component: monitoring
+    tier: infrastructure
+    release: stable-2.5
+  annotations:
+    agent.build: "2024.1.1-rc3"
+    scm.revision: "a1b2c3d4"
+    support.window: "24/7"
+spec:
+  serviceName: "agent-service"
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+  selector:
+    matchLabels:
+      app: cluster-agent
+      role: monitoring-agent
+  template:
+    metadata:
+      labels:
+        app: cluster-agent
+        role: monitoring-agent
+        version: v2.5.0
+      annotations:
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9100"
+        prometheus.io/scheme: "http"
+        checksum/config: "a8b3c9d2f1e5"
+    spec:
+      serviceAccountName: agent-service-account
+      terminationGracePeriodSeconds: 300
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        runAsNonRoot: true
+      priorityClassName: system-node-critical
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - cluster-agent
+            topologyKey: "kubernetes.io/hostname"
+      tolerations:
+      - key: "dedicated"
+        operator: "Exists"
+        effect: "NoSchedule"
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: cluster-agent
+      hostNetwork: false
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: agent-container
+        image: registry.enterprise.com/monitoring/agent:v2.5.0
+        imagePullPolicy: IfNotPresent
+        args: ["--config=/etc/agent/config.yaml"]
+        ports:
+        - name: metrics
+          containerPort: 9100
+          protocol: TCP
+        - name: healthcheck
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: CLUSTER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: cluster-info
+              key: cluster.name
+        - name: API_ENDPOINT
+          value: "https://api.cluster.internal"
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: agent-secrets
+              key: encryption.key
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - name: agent-config
+          mountPath: /etc/agent
+          readOnly: true
+        - name: persistent-data
+          mountPath: /var/lib/agent
+        - name: host-root
+          mountPath: /host
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["/bin/agent", "status"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 10
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 60 && /bin/agent graceful-stop"]
+        securityContext:
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: log-forwarder
+        image: registry.enterprise.com/logging/fluentd:v1.14.5
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+        - name: host-logs
+          mountPath: /var/log/host
+          readOnly: true
+        - name: log-buffer
+          mountPath: /var/log/buffer
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      initContainers:
+      - name: config-init
+        image: busybox:1.36
+        command: ['sh', '-c', 'echo "Initializing agent config..." && cp /tmp/config/* /etc/agent']
+        volumeMounts:
+        - name: agent-config
+          mountPath: /etc/agent
+        - name: temp-config
+          mountPath: /tmp/config
+      volumes:
+      - name: agent-config
+        configMap:
+          name: agent-configmap
+          defaultMode: 0400
+      - name: temp-config
+        emptyDir: {}
+      - name: host-root
+        hostPath:
+          path: /
+      - name: host-logs
+        hostPath:
+          path: /var/log
+          type: Directory
+      volumeClaimTemplates:
+      - metadata:
+          name: persistent-data
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          storageClassName: "ssd-premium"
+          resources:
+            requests:
+              storage: 100Gi
+      - metadata:
+          name: log-buffer
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          storageClassName: "fast-storage"
+          resources:
+            requests:
+              storage: 50Gi
