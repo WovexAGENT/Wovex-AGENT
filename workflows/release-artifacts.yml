@@ -1,0 +1,290 @@
+name: Hadean AGENT Release Pipeline
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      release-tier:
+        description: 'Release Tier (stable/candidate/security)'
+        required: true
+        default: 'stable'
+
+env:
+  RELEASE_VERSION: ${{ github.event.release.tag_name }}
+  GPG_KEY_ID: '90C406B62B9C8246'
+  COSIGN_KEY_VERSION: '1'
+  SBOM_FORMAT: 'cyclonedx'
+  CONTAINER_REGISTRY: 'ghcr.io'
+
+jobs:
+  version-validation:
+    name: Version Consistency Check
+    runs-on: ubuntu-latest
+    outputs:
+      semver-valid: ${{ steps.validate.outputs.valid }}
+    steps:
+    - name: Verify Tag Pattern
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const tag = process.env.GITHUB_REF.replace('refs/tags/', '');
+          if (!/^v?\d+\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?$/.test(tag)) {
+            core.setFailed(`Invalid version format: ${tag}`);
+          }
+          core.setOutput('valid', 'true')
+
+  build-artifacts:
+    name: Multi-Platform Build
+    needs: version-validation
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-12, windows-2022]
+        arch: [amd64, arm64]
+        include:
+          - os: ubuntu-22.04
+            package-type: deb
+          - os: macos-12
+            package-type: pkg
+          - os: windows-2022
+            package-type: msi
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Setup Build Tools
+      shell: bash
+      run: |
+        case "${{ runner.os }}" in
+          Linux)
+            sudo apt-get install -y build-essential libssl-dev libgpgme-dev pkg-config
+            ;;
+          macOS)
+            brew install automake libtool openssl@3
+            ;;
+          Windows)
+            choco install -y msbuild openssl llvm
+            ;;
+        esac
+
+    - name: Configure Go Environment
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        check-latest: true
+
+    - name: Build Core Components
+      env:
+        CGO_ENABLED: 1
+        GOOS: ${{ runner.os }}
+        GOARCH: ${{ matrix.arch }}
+      run: |
+        make build RELEASE_TYPE=${{ inputs.release-tier }} \
+          OUTPUT=dist/${{ runner.os }}-${{ matrix.arch }}/hadean-agent
+
+    - name: Package Artifacts
+      run: |
+        case "${{ runner.os }}" in
+          Linux)
+            fpm -s dir -t deb -n hadean-agent -v ${RELEASE_VERSION#v} \
+              --description "Hadean AGENT Core Components" \
+              --url https://hadean.ai \
+              --deb-systemd src/systemd/hadean-agent.service \
+              dist/${{ runner.os }}-${{ matrix.arch }}/=/opt/hadean-agent/
+            ;;
+          macOS)
+            pkgbuild --root dist/${{ runner.os }}-${{ matrix.arch }} \
+              --identifier ai.hadean.agent \
+              --version ${RELEASE_VERSION#v} \
+              --install-location /usr/local/bin \
+              hadean-agent-${{ matrix.arch }}.pkg
+            ;;
+          Windows)
+            heat dir dist/${{ runner.os }}-${{ matrix.arch }} \
+              -gg -srd -cg HadeanAgentFiles -dr INSTALLDIR \
+              -out obj/${{ matrix.arch }}/files.wxs
+            candle -arch ${{ matrix.arch }} \
+              -dVersion="${{ env.RELEASE_VERSION }}" \
+              obj/${{ matrix.arch }}/*.wxs
+            light -ext WixUIExtension -out hadean-agent-${{ matrix.arch }}.msi
+            ;;
+        esac
+
+    - name: Generate Build Provenance
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifacts-${{ runner.os }}-${{ matrix.arch }}
+        path: |
+          hadean-agent-*.${{ matrix.package-type }}
+          dist/**/*.sha256sum
+
+  sign-release:
+    name: Cryptographic Signing
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: write
+      id-token: write  # For OIDC signing
+
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: unsigned-artifacts
+
+    - name: Install Signing Tools
+      run: |
+        sudo apt-get install -y gnupg2 libgpgme-dev
+        go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+
+    - name: Import GPG Key
+      env:
+        GPG_PRIVATE_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+      run: |
+        echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+        gpg --list-secret-keys
+
+    - name: Sign Packages
+      run: |
+        find unsigned-artifacts -type f \( -name '*.deb' -o -name '*.pkg' -o -name '*.msi' \) \
+          -exec gpg --armor --detach-sign --local-user ${{ env.GPG_KEY_ID }} {} \;
+
+    - name: Cosign Attestations
+      run: |
+        cosign attest --yes \
+          --predicate unsigned-artifacts/ \
+          --type https://hadean.ai/attestations/build/v1 \
+          --key "azurekms://hadean-release.vault.azure.net/keys/cosign/${{ env.COSIGN_KEY_VERSION }}" \
+          --tlog-upload=false
+
+    - name: Upload Signed Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: signed-release
+        path: |
+          unsigned-artifacts/*.asc
+          cosign-attestations.json
+
+  publish-distribution:
+    name: Artifact Distribution
+    needs: sign-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cloud: [aws, gcp, azure]
+    services:
+      minio:
+        image: minio/minio:RELEASE.2023-10-25T06-33-25Z
+        env:
+          MINIO_ROOT_USER: testuser
+          MINIO_ROOT_PASSWORD: testpass
+        ports:
+          - 9000:9000
+          - 9001:9001
+        options: --entrypoint sh -c "minio server /data --console-address :9001"
+
+    steps:
+    - name: Download Signed Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-packages
+
+    - name: Multi-Cloud Upload
+      run: |
+        case "${{ matrix.cloud }}" in
+          aws)
+            aws s3 sync release-packages/ s3://hadean-releases/${{ env.RELEASE_VERSION }}/ \
+              --acl bucket-owner-full-control \
+              --sse aws:kms
+            ;;
+          gcp)
+            gsutil -m rsync -r release-packages/ gs://hadean-releases/${{ env.RELEASE_VERSION }}/
+            ;;
+          azure)
+            az storage blob upload-batch \
+              --destination hadean-releases \
+              --source release-packages \
+              --pattern "*${{ env.RELEASE_VERSION }}*" \
+              --auth-mode login
+            ;;
+        esac
+
+    - name: Container Registry Push
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile.release
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ${{ env.CONTAINER_REGISTRY }}/hadean/agent:${{ env.RELEASE_VERSION }}
+          ${{ env.CONTAINER_REGISTRY }}/hadean/agent:latest
+        provenance: true
+        sbom: true
+
+  documentation:
+    name: Documentation Update
+    needs: publish-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: gh-pages
+        path: gh-pages
+
+    - name: Generate API Docs
+      run: |
+        docker run --rm -v $PWD:/docs hadean-agent-docs:latest \
+          sphinx-build -b html docs/src gh-pages/${{ env.RELEASE_VERSION }}
+
+    - name: Update Version Index
+      run: |
+        echo "${{ env.RELEASE_VERSION }}" >> gh-pages/versions.txt
+        jq --arg ver "${{ env.RELEASE_VERSION }}" \
+          '.versions += [$ver]' gh-pages/versions.json > tmp.json && mv tmp.json gh-pages/versions.json
+
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: gh-pages
+        keep_files: false
+
+  finalize:
+    name: Release Finalization
+    needs: [ publish-distribution, documentation ]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      with:
+        tag_name: ${{ env.RELEASE_VERSION }}
+        release_name: Hadean AGENT ${{ env.RELEASE_VERSION }}
+        body: ${{ github.event.release.body }}
+        draft: false
+        prerelease: ${{ contains(env.RELEASE_VERSION, '-') }}
+
+    - name: Notify Release Channel
+      uses: slackapi/slack-github-action@v1.26.0
+      with:
+        channel-id: ${{ secrets.RELEASE_NOTIFICATION_CHANNEL }}
+        status: ${{ job.status }}
+        mention: here
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
+
+    - name: Purge CDN Cache
+      uses: youyo/aws-cloudfront-invalidate-action@1.0.3
+      with:
+        distribution-id: ${{ secrets.AWS_CF_DISTRIBUTION_ID }}
+        paths: /*
+        access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        region: us-west-2
