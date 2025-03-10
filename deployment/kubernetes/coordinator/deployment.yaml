@@ -1,0 +1,183 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app-deployment
+  namespace: production
+  labels:
+    app: web-app
+    environment: production
+    tier: frontend
+    version: v2.3.1
+  annotations:
+    deployment.kubernetes.io/revision: "3"
+    maintainer: "devops-team@company.com"
+    git-repo: "https://github.com/company/web-app"
+    monitoring-tool: "prometheus:9090"
+    backup-enabled: "true"
+spec:
+  replicas: 5
+  revisionHistoryLimit: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 15%
+  minReadySeconds: 30
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      app: web-app
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: web-app
+        tier: frontend
+        version: v2.3.1
+      annotations:
+        build-timestamp: "2024-02-15T12:34:56Z"
+        sidecar-inject: "true"
+    spec:
+      serviceAccountName: frontend-service-account
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+        runAsNonRoot: true
+      priorityClassName: high-priority
+      containers:
+      - name: web-container
+        image: registry.company.com/web-app:v2.3.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: database.host
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: api_key
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["/bin/sh", "-c", "curl -s http://localhost:8080/ready"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 10
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 30"]
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/app/config
+          readOnly: true
+        securityContext:
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+      - name: sidecar
+        image: registry.company.com/log-collector:v1.2.0
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: log-volume
+          mountPath: /var/log/app
+      initContainers:
+      - name: config-downloader
+        image: busybox:1.28
+        command: ['sh', '-c', 'wget -O /config/app.properties https://config-server/app-config']
+        volumeMounts:
+        - name: config-volume
+          mountPath: /config
+      volumes:
+      - name: config-volume
+        emptyDir: {}
+      - name: log-volume
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: app-config
+        configMap:
+          name: app-config
+      - name: app-secrets
+        secret:
+          secretName: app-secrets
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: disktype
+                operator: In
+                values:
+                - ssd
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - web-app
+              topologyKey: kubernetes.io/hostname
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "frontend"
+        effect: "NoSchedule"
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: web-app
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+        - name: edns0
+      hostAliases:
+      - ip: "192.168.1.100"
+        hostnames:
+        - "internal-service.company.local"
