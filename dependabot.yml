@@ -1,0 +1,144 @@
+# .github/dependabot.yml
+
+version: 2
+enable-beta: true
+registries:
+  hadean-private:
+    type: npm-registry
+    url: https://registry.hadean.ai
+    token: ${{secrets.NPM_ENTERPRISE_TOKEN}}
+  hadean-docker:
+    type: docker-registry
+    url: registry.hadean.ai
+    username: ${{secrets.DOCKERHUB_USER}}
+    password: ${{secrets.DOCKERHUB_PAT}}
+  gomod-private:
+    type: go-module
+    url: https://go.hadean.ai
+    token: ${{secrets.GO_PRIVATE_TOKEN}}
+
+updates:
+  # Core Infrastructure Dependencies
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    allow:
+      - dependency-type: "production"
+    ignore:
+      - dependency-name: "alpine:*"
+      - dependency-name: "nginx:*"
+        versions: ["~> 1.25"]
+    registries:
+      - hadean-docker
+    redirect:
+      docker.io => registry.hadean.ai
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    reviewers:
+      - "security-team"
+    labels:
+      - "dependencies"
+      - "containers"
+
+  # CI/CD Pipeline Updates  
+  - package-ecosystem: "github-actions"
+    directory: "/.github/workflows"
+    schedule:
+      interval: "daily"
+      time: "17:30"
+    open-pull-requests-limit: 5
+    versioning-strategy: "increase-if-necessary"
+    allow:
+      - dependency-name: "actions/*"
+      - dependency-name: "docker/*"
+    ignore:
+      - dependency-name: "sigstore/*"
+        until: "2025-01-01"
+    reviewers:
+      - "devops-team"
+
+  # Python Core Components
+  - package-ecosystem: "pip"
+    directory: "/src/python"
+    schedule:
+      interval: "weekly"
+    versioning-strategy: "lockfile-only"
+    insecure-external-code-execution: "deny"
+    allow:
+      - dependency-type: "direct"
+    ignore:
+      - dependency-name: "tensorflow*"
+        versions: ["< 2.16"]
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
+    registries:
+      - hadean-private
+
+  # Go Module Updates
+  - package-ecosystem: "gomod"
+    directory: "/src/go"
+    schedule:
+      interval: "monthly"
+    gomod:
+      update-vendored: true
+      workspace: "agent-core"
+    ignore:
+      - dependency-name: "google.golang.org/grpc"
+        versions: ["1.62.x"]
+      - dependency-name: "github.com/hashicorp/vault"
+        update-types: ["security"]
+    registries:
+      - gomod-private
+
+  # Frontend Dependencies
+  - package-ecosystem: "npm"
+    directory: "/web/ui"
+    schedule:
+      interval: "weekly"
+    registries:
+      - hadean-private
+    versioning-strategy: "widen-ranges"
+    allow:
+      - dependency-name: "@hadean/ui-kit"
+      - dependency-name: "react*"
+    ignore:
+      - dependency-name: "webpack*"
+        update-types: ["version-update:semver-major"]
+
+  # Security Patches (Emergency Channel)
+  - package-ecosystem: "*"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    allow:
+      dependency-type: "security"
+    labels:
+      - "security-hotfix"
+    priority: "high"
+    milestone: 1
+    reviewers:
+      - "security-team"
+      - "cto"
+    commit-message:
+      prefix: "SECURITY"
+      prefix-development: false
+
+# Compliance Controls
+vulnerability-alerts:
+  enabled: true
+  assignees:
+    - "security-ops"
+  labels:
+    - "CVSS >= 7.0": "severity:critical"
+    - "CVE-2024-*": "zero-day"
+  ignored-cves:
+    - "CVE-2021-44228"  # Log4j (already mitigated)
+  auto-dismiss:
+    - range: ">= 30 days"
+      reason: "stale"
+    - range: "CVSS < 4.0"
+      reason: "low-risk"
