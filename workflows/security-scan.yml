@@ -1,0 +1,222 @@
+name: Hadean AGENT Security Scans
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+  schedule:
+    - cron: '0 3 * * 1'  # Weekly Monday 3AM UTC
+  release:
+    types: [ published ]
+
+env:
+  TRIVY_VERSION: '0.44.1'
+  GRYPE_VERSION: '0.74.0'
+  POLICY_DIR: 'src/security/policies'
+
+jobs:
+  sast:
+    name: SAST & Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for commit analysis
+
+    - name: CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        languages: python
+        queries: +security-extended
+        ram: 8192
+        category: /security/
+        upload-database: true
+
+    - name: Custom Python SAST (Bandit)
+      run: |
+        bandit -r src/ -f json -o bandit-results.json
+        python scripts/sast_analyzer.py bandit-results.json
+
+    - name: Secret Detection (Gitleaks)
+      uses: zricethezav/gitleaks-action@v8
+      with:
+        config-path: .gitleaks.toml
+        redact: true
+        verbose: true
+
+    - name: Upload SAST Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: sast-artifacts
+        path: |
+          bandit-results.json
+          codeql-results.sarif
+          gitleaks-report.json
+
+  dependency-scan:
+    name: Dependency Vulnerability Analysis
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package-manager: [ 'pip', 'docker', 'os' ]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Trivy Vulnerability Scan
+      uses: aquasecurity/trivy-action@0.15
+      with:
+        scan-type: 'fs'
+        scan-ref: './'
+        format: 'json'
+        output: 'trivy-report.json'
+        ignore-unfixed: false
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        scanners: 'vuln,config,secret'
+        exit-code: '0'
+        template: '@/contrib/gitlab.tpl'
+
+    - name: Grype SBOM Generation
+      uses: anchore/grype-action@v1
+      with:
+        output: 'cyclonedx'
+        file: 'sbom.cdx.json'
+        scope: 'Squashed'
+
+    - name: OSS Index Audit
+      uses: sonatype-nexus-community/gha-oss-index-audit@v1
+      with:
+        package-manager: ${{ matrix.package-manager }}
+        oss-index-user: ${{ secrets.OSS_INDEX_USER }}
+        oss-index-token: ${{ secrets.OSS_INDEX_TOKEN }}
+
+    - name: Upload Dependency Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: depscan-${{ matrix.package-manager }}
+        path: |
+          trivy-report.json
+          sbom.cdx.json
+          oss-audit.log
+
+  container-scan:
+    name: Container Image Security
+    runs-on: ubuntu-latest
+    needs: [ sast, dependency-scan ]
+    environment: production
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Container
+      run: |
+        docker build -t hadean-agent-core:security-scan \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          -f Dockerfile.security .
+
+    - name: Clair Container Scan
+      uses: anchore/scan-action@v3
+      with:
+        image: 'hadean-agent-core:security-scan'
+        severity-cutoff: 'high'
+        fail-build: false
+        output-format: 'json'
+        policy-bundle: ${{ env.POLICY_DIR }}/container-scan-policy.json
+
+    - name: Cosign Signature Verification
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.0'
+      continue-on-error: true
+
+    - name: Verify SBOM Attestations
+      run: |
+        cosign verify-attestation \
+          --key ${{ secrets.COSIGN_PUBLIC_KEY }} \
+          hadean-agent-core:security-scan \
+          --type cyclonedx
+
+    - name: Upload Container Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: container-scan
+        path: |
+          clair-scan-results.json
+          cosign-verification.log
+
+  compliance-check:
+    name: Compliance Validation
+    runs-on: ubuntu-latest
+    needs: container-scan
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: CIS Benchmark Checks
+      uses: aquasecurity/trivy-action@0.15
+      with:
+        scan-type: 'config'
+        scan-ref: './deployment/'
+        format: 'table'
+        exit-code: '0'
+        security-checks: 'config'
+        compliance: 'cis-kubernetes,cis-docker'
+
+    - name: GDPR Compliance Audit
+      run: |
+        opa eval --format pretty \
+          -b ${{ env.POLICY_DIR }} \
+          -d gdpr.rego \
+          -i deployment/ \
+          'data.gdpr.violation'
+
+    - name: Export Compliance Evidence
+      uses: actions/upload-artifact@v4
+      with:
+        name: compliance-reports
+        path: |
+          trivy-compliance.log
+          gdpr-audit.json
+
+  security-gates:
+    name: Policy Enforcement
+    runs-on: ubuntu-latest
+    needs: [ compliance-check ]
+    steps:
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: security-reports
+
+    - name: Central Policy Evaluation
+      uses: open-policy-agent/conftest-action@v1
+      with:
+        policy: ${{ env.POLICY_DIR }}
+        files: |
+          security-reports/**/*.json
+          security-reports/**/*.sarif
+        output: json
+
+    - name: Fail on Critical Issues
+      run: |
+        python scripts/security-gate.py \
+          --sast security-reports/sast-artifacts/bandit-results.json \
+          --depscan security-reports/depscan-*/trivy-report.json \
+          --container security-reports/container-scan/clair-scan-results.json \
+          --threshold CRITICAL
+
+    - name: Security Dashboard Update
+      run: |
+        curl -X POST \
+          -H "Authorization: Bearer ${{ secrets.SECURITY_API_KEY }}" \
+          -F 'reports=@security-reports' \
+          ${{ vars.SECURITY_DASHBOARD_ENDPOINT }}
+
+    - name: Slack Alert
+      if: ${{ failure() }}
+      uses: slackapi/slack-github-action@v1.26.0
+      with:
+        channel-id: ${{ secrets.SECURITY_ALERTS_CHANNEL }}
+        status: ${{ job.status }}
+        mention: 'here'
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_SECURITY_BOT_TOKEN }}
