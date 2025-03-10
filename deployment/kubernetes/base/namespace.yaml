@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # The name of the namespace (must be a valid DNS label)
+  name: my-namespace
+  # Labels for organizing and selecting namespaces
+  labels:
+    environment: production
+    team: backend
+    app.kubernetes.io/component: database
+  # Annotations for non-identifying metadata
+  annotations:
+    description: "Namespace for production database resources"
+    owner: "infra-team@company.com"
+    monitor-tool: "prometheus/grafana"
+    backup-schedule: "daily"
+    support-tier: "24/7"
+spec:
+  # Finalizers array (controls namespace deletion behavior)
+  finalizers:
+  - kubernetes
