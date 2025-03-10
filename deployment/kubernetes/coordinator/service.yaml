@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator-service
+  namespace: system
+  labels:
+    app: coordinator
+    component: orchestration
+    environment: production
+    tier: backend
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+    cloud-provider-specific-annotation: "load-balancer-id=lb-123xyz"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9102"
+    description: "Main service for coordinating distributed tasks"
+spec:
+  selector:
+    app: coordinator
+    tier: backend
+  type: ClusterIP
+  clusterIP: None  # For headless service configuration
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+  ports:
+  - name: http-api
+    protocol: TCP
+    port: 8080
+    targetPort: 8080
+    appProtocol: http
+  - name: grpc
+    protocol: TCP
+    port: 50051
+    targetPort: 50051
+    appProtocol: grpc
+  - name: metrics
+    protocol: TCP
+    port: 9102
+    targetPort: 9102
+  publishNotReadyAddresses: true
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ipFamilyPolicy: RequireDualStack
+  ipFamilies:
+  - IPv6
+  - IPv4
+  loadBalancerIP: 203.0.113.10
+  loadBalancerSourceRanges:
+  - 192.30.252.0/22
+  - 185.199.108.0/22
+  healthCheckNodePort: 32000
+  topologyKeys:
+  - "topology.kubernetes.io/zone"
+  - "kubernetes.io/hostname"
