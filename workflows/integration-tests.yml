@@ -1,0 +1,195 @@
+name: Hadean AGENT Integration Tests
+
+on:
+  schedule:
+    - cron: '0 22 * * 1-5'  # Weekday nights at 10pm UTC
+  workflow_dispatch:
+    inputs:
+      test-scope:
+        description: 'Test scope (core/fl/security)'
+        required: true
+        default: 'core'
+
+env:
+  CLUSTER_NAME: 'hadean-test-cluster'
+  KUBERNETES_VERSION: '1.27'
+  HELM_VERSION: '3.12.1'
+  VAULT_VERSION: '1.14.0'
+  TEST_NAMESPACE: 'hadean-integration'
+
+jobs:
+  integration-core:
+    name: Core Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        cloud: [aws, azure, gcp]
+      fail-fast: false
+
+    services:
+      kind:
+        image: kindest/node:v${{ env.KUBERNETES_VERSION }}
+        ports:
+          - 6443:6443
+        options: --privileged
+
+      vault:
+        image: hashicorp/vault:${{ env.VAULT_VERSION }}
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: 'integration-test-token'
+        ports:
+          - 8200:8200
+        options: --network=kind
+
+    steps:
+    - name: Checkout with submodules
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Setup Kubernetes Cluster (Kind)
+      uses: engineerd/setup-kind@v0.7.0
+      with:
+        version: ${{ env.KUBERNETES_VERSION }}
+        name: ${{ env.CLUSTER_NAME }}
+        config: |
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          networking:
+            podSubnet: "10.244.0.0/16"
+            serviceSubnet: "10.245.0.0/16"
+          nodes:
+            - role: control-plane
+              kubeadmConfigPatches:
+                - |
+                  kind: InitConfiguration
+                  nodeRegistration:
+                    kubeletExtraArgs:
+                      node-labels: "ingress-ready=true"
+              extraPortMappings:
+                - containerPort: 80
+                  hostPort: 80
+                  protocol: TCP
+                - containerPort: 443
+                  hostPort: 443
+                  protocol: TCP
+
+    - name: Deploy Base Infrastructure
+      run: |
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        helm upgrade --install \
+          --namespace ${{ env.TEST_NAMESPACE }} \
+          --create-namespace \
+          hadean-deps bitnami/kafka \
+          --set persistence.enabled=false \
+          --set zookeeper.persistence.enabled=false
+
+        kubectl apply -f deployment/kubernetes/base/ -n ${{ env.TEST_NAMESPACE }}
+
+    - name: Run Federated Learning Tests
+      if: ${{ matrix.cloud == 'aws' }}
+      run: |
+        kubectl apply -f deployment/kubernetes/federated-learning/ -n ${{ env.TEST_NAMESPACE }}
+        pytest tests/integration/test_federated_learning.py \
+          --cloud=${{ matrix.cloud }} \
+          --junitxml=fl-test-results.xml \
+          -v
+      env:
+        KUBECONFIG: /home/runner/.kube/config
+
+    - name: Cross-Service Communication Tests
+      run: |
+        ./scripts/deploy-mock-services.sh
+        grpcurl -plaintext -proto src/coordination-layer/messaging/grpc/proto/agent.proto \
+          -d '{"task_id": "e2e-test"}' \
+          localhost:50051 hadean.agent.v1.AgentService/ExecuteTask
+        
+        pytest tests/integration/test_grpc_kafka.py \
+          --junitxml=comm-test-results.xml \
+          -v
+
+    - name: Chaos Engineering Tests
+      uses: chaostoolkit/chaos-github-action@v1.5
+      with:
+        experiment-file: "tests/integration/chaos/network_partition.json"
+        settings-file: "chaos.settings.yaml"
+        cloud-provider: ${{ matrix.cloud }}
+
+    - name: Performance Benchmark
+      run: |
+        locust -f tests/performance/locustfile.py \
+          --headless \
+          --users 1000 \
+          --spawn-rate 50 \
+          --run-time 10m \
+          --csv=perf-results
+        
+        python scripts/analyze_perf.py perf-results_stats.csv
+
+    - name: Security Validation
+      run: |
+        trivy config --severity HIGH,CRITICAL ./deployment/kubernetes/
+        kubectl-slice --input-file deployment/kubernetes/ --output-dir ./manifest-analysis/
+        checkov -d ./manifest-analysis/ --framework kubernetes
+        
+        nmap -sV --script vulners -p 50051,9092,5432 localhost
+
+    - name: Tear Down Cluster
+      if: always()
+      run: kind delete cluster --name ${{ env.CLUSTER_NAME }}
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: integration-results-${{ matrix.cloud }}
+        path: |
+          *-test-results.xml
+          perf-results*.csv
+          security-scan.log
+
+  security-validation:
+    name: Security Integration Tests
+    needs: integration-core
+    runs-on: ubuntu-latest
+    environment: security-testing
+    steps:
+      - name: Run OPA Policy Tests
+        uses: open-policy-agent/conftest-action@v1
+        with:
+          policy: src/security/policy/
+          files: deployment/kubernetes/**/*.yaml
+
+      - name: SPIFFE Identity Validation
+        run: |
+          kubectl exec -n ${{ env.TEST_NAMESPACE }} deploy/coordinator -- \
+            spire-agent api fetch x509 -socketPath /run/spire/sockets/agent.sock
+          
+          curl --unix-socket /run/spire/sockets/agent.sock \
+            http://localhost/api/agent/validate
+
+      - name: Generate SBOM
+        uses: cyclonedx/cdxgen-action@v3
+        with:
+          output-file: bom.json
+          output-format: json
+
+  reporting:
+    name: Test Reporting
+    needs: [integration-core, security-validation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Allure Report
+        uses: simple-elf/allure-report-action@v1
+        with:
+          allure-results: '**/test-results/'
+        
+      - name: Publish Metrics
+        run: |
+          python scripts/metrics_publisher.py \
+            --junit **/*-results.xml \
+            --output metrics.json
+            
+          curl -X POST -H "Authorization: Bearer ${{ secrets.METRICS_API_TOKEN }}" \
+            -d @metrics.json ${{ vars.METRICS_ENDPOINT }}
