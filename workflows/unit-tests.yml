@@ -1,0 +1,161 @@
+name: Hadean AGENT Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Manual trigger
+
+env:
+  PYTHON_VERSION: '3.12'
+  POSTGRES_VERSION: '15-alpine'
+  KAFKA_VERSION: '7.5.1'
+  DOCKER_NETWORK: 'hadean-net'
+
+jobs:
+  unit-tests:
+    name: Run Unit Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.10', '3.11', '3.12']
+      fail-fast: false
+
+    services:
+      postgres:
+        image: postgres:${{ env.POSTGRES_VERSION }}
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d testdb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --network ${{ env.DOCKER_NETWORK }}
+
+      zookeeper:
+        image: confluentinc/cp-zookeeper:${{ env.KAFKA_VERSION }}
+        ports:
+          - 2181:2181
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+        options: --network ${{ env.DOCKER_NETWORK }}
+
+      kafka:
+        image: confluentinc/cp-kafka:${{ env.KAFKA_VERSION }}
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        depends_on:
+          - zookeeper
+        options: --network ${{ env.DOCKER_NETWORK }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+        persist-credentials: false
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+        cache-dependency-path: '**/requirements.txt'
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y \
+          libenchant-2-2 \
+          libgirepository-1.0-1 \
+          libpq-dev \
+          build-essential
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip wheel
+        pip install -r requirements.txt \
+          -r requirements-dev.txt \
+          --no-cache-dir
+
+    - name: Configure Test Environment
+      run: |
+        export DATABASE_URL="postgresql://testuser:testpass@localhost:5432/testdb"
+        export KAFKA_BROKERS="localhost:9092"
+        echo "SECRET_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+        echo "PGSSLMODE=disable" >> $GITHUB_ENV
+
+    - name: Run Unit Tests with Coverage
+      run: |
+        coverage run --source=src -m pytest \
+          tests/unit/ \
+          --junitxml=test-results/junit.xml \
+          --cov-report=xml:coverage.xml \
+          --cov-report=html:coverage_html \
+          --disable-warnings \
+          -v
+      env:
+        PYTHONPATH: ${{ github.workspace }}/src
+
+    - name: Upload Code Coverage
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: coverage.xml
+        flags: unittests
+
+    - name: Security Scan (Bandit)
+      run: |
+        bandit -r src/ -f json -o bandit-results.json
+      continue-on-error: true
+
+    - name: Dependency Vulnerability Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './'
+        format: 'table'
+        exit-code: '0'
+        severity: 'CRITICAL'
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: unit-test-results-${{ matrix.os }}-py${{ matrix.python-version }}
+        path: |
+          test-results/**/*.xml
+          coverage.xml
+          bandit-results.json
+
+    - name: Slack Notification
+      if: ${{ failure() }}
+      uses: slackapi/slack-github-action@v1.26.0
+      with:
+        channel-id: ${{ secrets.SLACK_ALERTS_CHANNEL }}
+        status: ${{ job.status }}
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  nightly-tests:
+    name: Nightly Full Test Suite
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Extended Resource Check
+        run: |
+          docker run --network ${{ env.DOCKER_NETWORK }} hadean-agent-core \
+            pytest tests/unit/test_resource_limits.py -v
