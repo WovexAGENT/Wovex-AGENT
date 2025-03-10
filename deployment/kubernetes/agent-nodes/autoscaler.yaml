@@ -1,0 +1,83 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-nodes-autoscaler
+  namespace: monitoring
+  labels:
+    app: cluster-agent
+    component: autoscaling
+    tier: infrastructure
+  annotations:
+    autoscaler.kubernetes.io/update-interval: "30s"
+    metric-resolution.window: "5m"
+    cooldown-config: "scale-up=3m,scale-down=15m"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: agent-nodes
+  minReplicas: 3
+  maxReplicas: 15
+  behavior:
+    scaleUp:
+      policies:
+      - type: Pods
+        value: 4
+        periodSeconds: 60
+      - type: Percent
+        value: 100
+        periodSeconds: 120
+      selectPolicy: Max
+      stabilizationWindowSeconds: 300
+    scaleDown:
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 90
+      - type: Percent
+        value: 20
+        periodSeconds: 300
+      selectPolicy: Min
+      stabilizationWindowSeconds: 600
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+        averageValue: 500m
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 65
+  - type: Pods
+    pods:
+      metric:
+        name: connections-per-pod
+      target:
+        type: AverageValue
+        averageValue: 1000
+  - type: Object
+    object:
+      describedObject:
+        apiVersion: v1
+        kind: Service
+        name: agent-service
+      metric:
+        name: requests-per-second
+      target:
+        type: Value
+        value: 10k
+  - type: External
+    external:
+      metric:
+        name: queue_messages
+        selector:
+          matchLabels:
+            queue: task_queue
+      target:
+        type: AverageValue
+        averageValue: "30"
