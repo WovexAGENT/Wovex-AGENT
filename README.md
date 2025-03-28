@@ -1,4 +1,4 @@
-# Hadean-AI Platform
+# Wovex AGENT Platform
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
@@ -8,20 +8,22 @@
 
 Enterprise-grade distributed intelligence platform for building and operating AI agent ecosystems at planetary scale.
 
-[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/HadeanAI)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-%230077B5.svg?style=for-the-badge&logo=LinkedIn&logoColor=white)](https://www.linkedin.com/in/evan-cox-325928b/)
-[![GitHub](https://img.shields.io/badge/GitHub-%23121011.svg?style=for-the-badge&logo=GitHub&logoColor=white)](https://github.com/HadeanAI)
+[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/@WovexAGENT)
+[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?style=for-the-badge&logo=Twitter&logoColor=white)](https://twitter.com/@davidhcumming)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-%230077B5.svg?style=for-the-badge&logo=LinkedIn&logoColor=white)](https://www.linkedin.com/in/davidhcummings/)
+[![GitHub](https://img.shields.io/badge/GitHub-%23121011.svg?style=for-the-badge&logo=GitHub&logoColor=white)](https://github.com/WovexAGENT/Wovex-AGENT)
 
 
 
 ```
- __  __               __                              ______  ______     
-/\ \/\ \             /\ \                            /\  _  \/\__  _\    
-\ \ \_\ \     __     \_\ \     __     __      ___    \ \ \L\ \/_/\ \/    
- \ \  _  \  /'__`\   /'_` \  /'__`\ /'__`\  /' _ `\   \ \  __ \ \ \ \    
-  \ \ \ \ \/\ \L\.\_/\ \L\ \/\  __//\ \L\.\_/\ \/\ \   \ \ \/\ \ \_\ \__ 
-   \ \_\ \_\ \__/.\_\ \___,_\ \____\ \__/.\_\ \_\ \_\   \ \_\ \_\/\_____\
-    \/_/\/_/\/__/\/_/\/__,_ /\/____/\/__/\/_/\/_/\/_/    \/_/\/_/\/_____/
+
+.------..------..------..------..------.     .------..------..------..------..------.
+|W.--. ||O.--. ||V.--. ||E.--. ||X.--. |.-.  |A.--. ||G.--. ||E.--. ||N.--. ||T.--. |
+| :/\: || :/\: || :(): || (\/) || :/\: ((5)) | (\/) || :/\: || (\/) || :(): || :/\: |
+| :\/: || :\/: || ()() || :\/: || (__) |'-.-.| :\/: || :\/: || :\/: || ()() || (__) |
+| '--'W|| '--'O|| '--'V|| '--'E|| '--'X| ((1)) '--'A|| '--'G|| '--'E|| '--'N|| '--'T|
+`------'`------'`------'`------'`------'  '-'`------'`------'`------'`------'`------'
+
 ```                                                                    
                                                                          
 ## System Architecture
@@ -29,62 +31,29 @@ Enterprise-grade distributed intelligence platform for building and operating AI
 ### High-Level Overview
 ```mermaid
 graph TD
-    A[Edge Devices] -->|Secure TLS| B(Agent Orchestrator)
-    B --> C{Policy Engine}
-    C -->|Approved| D[Model Registry]
-    D --> E[Federated Learning]
-    E --> F[(Global Model)]
+    A[Edge Devices]:::blue -->|Secure TLS| B(Agent Orchestrator):::teal
+    B --> C{Policy Engine}:::navy
+    C -->|Approved| D[Model Registry]:::steel
+    D --> E[Federated Learning]:::sky
+    E --> F[(Global Model)]:::cobalt
     F --> A
-    B --> G[Monitoring Stack]
-    G --> H[Grafana]
-    G --> I[Prometheus]
-    G --> J[Loki]
+    B --> G[Monitoring Stack]:::slate
+    G --> H[Grafana]:::aqua
+    G --> I[Prometheus]:::seafoam
+    G --> J[Loki]:::ice
+
+    classDef blue fill:#007bff,stroke:#0056b3,color:#fff
+    classDef teal fill:#20c997,stroke:#17a2b8,color:#fff
+    classDef navy fill:#001f3f,stroke:#000,color:#fff
+    classDef steel fill:#4a6d88,stroke:#2d3748,color:#fff
+    classDef sky fill:#87ceeb,stroke:#5d9cec,color:#000
+    classDef cobalt fill:#0047ab,stroke:#002366,color:#fff
+    classDef slate fill:#708090,stroke:#4a5568,color:#fff
+    classDef aqua fill:#00ffff,stroke:#00cccc,color:#000
+    classDef seafoam fill:#8fbc8f,stroke:#6b8e23,color:#000
+    classDef ice fill:#f0f8ff,stroke:#b0c4de,color:#000
+          
 ```
-
-## Core Workflows
-### Agent Lifecycle Management
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant O as Orchestrator
-    participant N as Node
-    participant M as Model Registry
-    
-    C->>O: CreateAgent(AgentSpec)
-    O->>M: GetModel(Spec.model_uri)
-    M-->>O: ModelArtifact
-    O->>N: Schedule(ResourceProfile)
-    N-->>O: AllocationConfirmed
-    O-->>C: AgentHandle
-    loop Heartbeat
-        N->>O: HealthCheck
-    end
-    C->>O: TerminateAgent
-    O->>N: Decommission
-
-```
-
-### Federated Learning Round
-```mermaid
-flowchart TB
-    subgraph Participants
-        P1[Org A]
-        P2[Org B]
-        P3[Org C]
-    end
-    
-    P1 -->|Encrypted Gradients| FC[Federated Coordinator]
-    P2 -->|Encrypted Gradients| FC
-    P3 -->|Encrypted Gradients| FC
-    FC -->|Secure Aggregation| AG[Aggregator]
-    AG -->|Noise Injection| DP[Differential Privacy]
-    DP -->|Updated Model| MR[Model Registry]
-    MR -->|Pull| Participants
-
-```
-
-
-
 
 ## Core Capabilities
 
@@ -135,6 +104,29 @@ Storage: Rook Ceph 1.10+ for persistent volumes
 Security: HashiCorp Vault 1.12+ & Boundary 0.12+
 ```
 
+## Core Workflows
+### Agent Lifecycle Management
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant O as Orchestrator
+    participant N as Node
+    participant M as Model Registry
+    
+    C->>O: CreateAgent(AgentSpec)
+    O->>M: GetModel(Spec.model_uri)
+    M-->>O: ModelArtifact
+    O->>N: Schedule(ResourceProfile)
+    N-->>O: AllocationConfirmed
+    O-->>C: AgentHandle
+    loop Heartbeat
+        N->>O: HealthCheck
+    end
+    C->>O: TerminateAgent
+    O->>N: Decommission
+
+```
+
 ## Getting Started
 ### Local Development
 ### Prerequisites
@@ -144,7 +136,7 @@ brew install k3d helm-cli kubectx
 python3 -m pip install --user poetry==1.4.2
 
 # Start Local Cluster
-k3d cluster create hadean-dev \
+k3d cluster create Wovex-dev \
   --api-port 6550 \
   --servers 1 \
   --agents 3 \
@@ -153,8 +145,8 @@ k3d cluster create hadean-dev \
 
 ### Bootstrap Environment
 ```
-git clone https://github.com/your-org/hadean-ai.git
-cd hadean-ai
+git clone https://github.com/your-org/Wovex-ai.git
+cd Wovex-ai
 
 # Install Dependencies
 poetry install --with dev
@@ -193,7 +185,7 @@ federatedLearning:
 
 ### Deployment Command
 ```
-helm upgrade hadean-prod ./charts/hadean-platform \
+helm upgrade Wovex-prod ./charts/Wovex-platform \
   --namespace ai-production \
   --values ./charts/prod-values.yaml \
   --set global.image.tag=$(git rev-parse --short HEAD) \
@@ -222,8 +214,8 @@ message AgentSpec {
 ### REST API Examples
 ### Start Federated Round
 ```
-curl -X POST https://api.hadean.ai/v1/federated/rounds \
-  -H "Authorization: Bearer $HA_TOKEN" \
+curl -X POST https://api.Wovex.ai/v1/federated/rounds \
+  -H "Authorization: Bearer $Wovex_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "strategy": "fedavg",
@@ -251,12 +243,12 @@ delta_privacy_epsilon{method="tree_aggregation"}
 apiVersion: velero.io/v1
 kind: Schedule
 metadata:
-  name: hadean-daily
+  name: Wovex-daily
 spec:
   schedule: "@every 24h"
   template:
     ttl: 720h
-    includedNamespaces: ["hadean-prod"]
+    includedNamespaces: ["Wovex-prod"]
     storageLocation: "aws-s3-west"
 ```
 
